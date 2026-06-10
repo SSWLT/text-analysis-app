@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import jieba
-import jieba.analyse
 from collections import Counter
 import pandas as pd
 from pyecharts import options as opts
@@ -11,88 +10,119 @@ from pyecharts.globals import ThemeType
 from streamlit_echarts import st_pyecharts
 import re
 import numpy as np
+from typing import Dict, List, Tuple, Optional
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 # 设置页面配置
-st.set_page_config(
-    page_title="文本分析可视化工具",
-    page_icon="📊",
-    layout="wide"
-)
+st.set_page_config(page_title="文本分析可视化工具", page_icon="📊", layout="wide")
 
 # 初始化session state
-if 'word_freq' not in st.session_state:
-    st.session_state.word_freq = None
-if 'text_content' not in st.session_state:
-    st.session_state.text_content = None
-if 'original_word_freq' not in st.session_state:
-    st.session_state.original_word_freq = None
+for key in ("word_freq", "text_content", "original_word_freq"):
+    if key not in st.session_state:
+        st.session_state[key] = None
+
+
+# 常量
+DEFAULT_STOP_WORDS = set(
+    [
+        '的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很',
+        '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这'
+    ]
+)
+
+CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fff]+')
+
+
+def safe_get(obj, default=""):
+    return obj if obj is not None else default
+
+
+# ----------------- 辅助函数（提前定义，避免调用时未定义） -----------------
+@st.cache_data(ttl=3600)
+def fetch_html(url: str) -> str:
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.encoding = resp.apparent_encoding or 'utf-8'
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        return soup.get_text(separator=' ')
+    except Exception as e:
+        logging.exception("fetch_html failed")
+        raise
+
+
+def clean_text(text: str) -> str:
+    lines = (line.strip() for line in text.splitlines())
+    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+    return ' '.join(chunk for chunk in chunks if chunk)
+
+
+@st.cache_data(ttl=3600)
+def compute_word_freq(text: str, stop_words: Optional[set] = None) -> Counter:
+    if stop_words is None:
+        stop_words = DEFAULT_STOP_WORDS
+    try:
+        words = jieba.lcut(text)
+    except Exception:
+        words = []
+
+    filtered: List[str] = []
+    for w in words:
+        if not w or len(w) < 2:
+            continue
+        if w in stop_words:
+            continue
+        if CHINESE_PATTERN.search(w):
+            filtered.append(w)
+
+    return Counter(filtered)
 
 # 标题
 st.title("📊 文本分析可视化工具")
 st.markdown("---")
 
 # 侧边栏 - 配置选项
+
+ 
+
+
 with st.sidebar:
     st.header("⚙️ 配置选项")
-    
-    # URL输入
-    st.subheader("1. 输入文章URL")
+    st.subheader("1. 输入文章或上传文件")
     url = st.text_input("请输入文章URL:", placeholder="https://example.com/article")
-    
-    # 抓取按钮
+    uploaded = st.file_uploader("或上传文本文件 (.txt)", type=["txt"], help="优先使用上传文件")
+
+    # 抓取并分析动作统一到一个按钮
     if st.button("🚀 抓取并分析文本", use_container_width=True):
-        if url:
+        if not url and not uploaded:
+            st.sidebar.warning("⚠️ 请输入URL或上传文件")
+        else:
             with st.spinner("正在抓取和分析文本..."):
                 try:
-                    # 抓取网页内容
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                    }
-                    response = requests.get(url, headers=headers, timeout=10)
-                    response.encoding = 'utf-8'
-                    
-                    # 解析HTML
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    
-                    # 移除脚本和样式
-                    for script in soup(["script", "style", "nav", "footer", "header"]):
-                        script.decompose()
-                    
-                    # 获取文本
-                    text = soup.get_text()
-                    # 清理文本
-                    lines = (line.strip() for line in text.splitlines())
-                    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-                    text = ' '.join(chunk for chunk in chunks if chunk)
-                    
+                    if uploaded is not None:
+                        raw = uploaded.read().decode('utf-8', errors='ignore')
+                    else:
+                        raw = fetch_html(url)
+
+                    if not raw:
+                        raise ValueError("未获取到任何文本内容")
+
+                    # 清理与分词
+                    text = clean_text(raw)
                     st.session_state.text_content = text
-                    
-                    # 使用jieba分词
-                    # jieba.enable_paddle()
-                    words = jieba.lcut(text)
-                    
-                    # 过滤非中文字符和停用词
-                    stop_words = set(['的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这'])
-                    filtered_words = []
-                    chinese_pattern = re.compile(r'[\u4e00-\u9fff]+')
-                    
-                    for word in words:
-                        if word in stop_words or len(word) < 2:
-                            continue
-                        if chinese_pattern.search(word):
-                            filtered_words.append(word)
-                    
-                    # 统计词频
-                    word_counter = Counter(filtered_words)
+
+                    word_counter = compute_word_freq(text)
                     st.session_state.original_word_freq = word_counter
                     st.session_state.word_freq = word_counter
-                    
-                    st.sidebar.success(f"✅ 成功抓取文本！共分析 {len(words)} 个词汇")
-                    
+
+                    st.sidebar.success(f"✅ 成功抓取并分析文本！共分析 {sum(word_counter.values())} 词次，{len(word_counter)} 种词")
                 except Exception as e:
-                    st.sidebar.error(f"❌ 抓取失败: {str(e)}")
-        else:
-            st.sidebar.warning("⚠️ 请输入URL")
+                    logging.exception("抓取/分析失败")
+                    st.sidebar.error(f"❌ 抓取或分析失败: {str(e)}")
     
     st.markdown("---")
     
@@ -107,20 +137,16 @@ with st.sidebar:
     
     # 词频过滤
     st.subheader("3. 过滤低频词")
-    if st.session_state.word_freq:
-        min_frequency = st.slider(
-            "最小词频:",
-            min_value=1,
-            max_value=50,
-            value=3,
-            help="过滤出现次数低于此值的词汇"
-        )
-        
+    if st.session_state.original_word_freq:
+        min_frequency = st.slider("最小词频:", min_value=1, max_value=50, value=3, help="过滤出现次数低于此值的词汇")
         if st.button("🔄 应用过滤", use_container_width=True):
-            filtered = {word: freq for word, freq in st.session_state.original_word_freq.items() 
-                       if freq >= min_frequency}
-            st.session_state.word_freq = Counter(filtered)
-            st.sidebar.success(f"过滤后剩余 {len(st.session_state.word_freq)} 个词汇")
+            try:
+                filtered = {word: freq for word, freq in st.session_state.original_word_freq.items() if freq >= min_frequency}
+                st.session_state.word_freq = Counter(filtered)
+                st.sidebar.success(f"过滤后剩余 {len(st.session_state.word_freq)} 个词汇")
+            except Exception as e:
+                logging.exception("过滤失败")
+                st.sidebar.error(f"过滤失败: {e}")
     
     st.markdown("---")
     
@@ -134,10 +160,13 @@ with st.sidebar:
     
     # 重置按钮
     if st.button("🔄 重置所有数据", use_container_width=True):
-        st.session_state.word_freq = None
-        st.session_state.text_content = None
-        st.session_state.original_word_freq = None
-        st.rerun()
+        for key in ("word_freq", "text_content", "original_word_freq"):
+            st.session_state[key] = None
+        st.experimental_rerun()
+ 
+
+
+# ----------------- 主展示逻辑 -----------------
 
 # 主内容区域
 if st.session_state.text_content and st.session_state.word_freq:
